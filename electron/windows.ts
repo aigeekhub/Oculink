@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, ipcMain, screen } from "electron";
+import { type OrbBounds, supportsOrbContentProtection } from "./recording/orbBounds";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -158,6 +159,95 @@ export function createHudOverlayWindow(): BrowserWindow {
 		});
 	}
 
+	return win;
+}
+
+/**
+ * Lightweight recording indicator owned by the main-process recording lifecycle.
+ * It remains hidden until the recording controller is minimized.
+ */
+export function createRecordingOrbWindow(initialBounds?: OrbBounds): BrowserWindow {
+	const { workArea } = screen.getPrimaryDisplay();
+	const bounds = initialBounds ?? {
+		x: workArea.x + workArea.width - 88,
+		y: workArea.y + workArea.height - 88,
+		width: 72,
+		height: 72,
+	};
+	const win = new BrowserWindow({
+		...bounds,
+		frame: false,
+		transparent: true,
+		backgroundColor: "#00000000",
+		roundedCorners: false,
+		resizable: false,
+		maximizable: false,
+		minimizable: false,
+		fullscreenable: false,
+		focusable: false,
+		alwaysOnTop: true,
+		skipTaskbar: true,
+		hasShadow: false,
+		show: false,
+		webPreferences: {
+			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
+			nodeIntegration: false,
+			contextIsolation: true,
+			backgroundThrottling: false,
+		},
+	});
+
+	if (supportsOrbContentProtection(process.platform)) {
+		try {
+			win.setContentProtection(true);
+		} catch (error) {
+			console.warn("Recording orb capture protection is unavailable:", error);
+		}
+	}
+
+	if (process.platform === "darwin") {
+		win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+	}
+
+	if (VITE_DEV_SERVER_URL) {
+		void win.loadURL(VITE_DEV_SERVER_URL + "?windowType=recording-orb");
+	} else {
+		void win.loadFile(path.join(RENDERER_DIST, "index.html"), {
+			query: { windowType: "recording-orb" },
+		});
+	}
+
+	return win;
+}
+
+export function createAppSettingsWindow(): BrowserWindow {
+	const win = new BrowserWindow({
+		width: 640,
+		height: 620,
+		minWidth: 560,
+		minHeight: 520,
+		show: false,
+		title: "OpenScreen Settings",
+		backgroundColor: "#09090b",
+		webPreferences: {
+			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
+			nodeIntegration: false,
+			contextIsolation: true,
+		},
+	});
+
+	if (VITE_DEV_SERVER_URL) {
+		void win.loadURL(VITE_DEV_SERVER_URL + "?windowType=app-settings");
+	} else {
+		void win.loadFile(path.join(RENDERER_DIST, "index.html"), {
+			query: { windowType: "app-settings" },
+		});
+	}
+	win.once("ready-to-show", () => {
+		if (!HEADLESS) win.show();
+	});
 	return win;
 }
 

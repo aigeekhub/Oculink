@@ -100,6 +100,33 @@ interface Window {
 			recordingId?: number,
 			cursorCaptureMode?: import("../src/lib/recordingSession").CursorCaptureMode,
 		) => Promise<void>;
+		setRecordingPaused: (
+			recordingId: number,
+			paused: boolean,
+		) => Promise<{ success: boolean; error?: string }>;
+		getRecordingLifecycleSnapshot: () => Promise<
+			import("./recording/recordingLifecycle").RecordingLifecycleSnapshot | null
+		>;
+		onRecordingLifecycleChanged: (
+			callback: (
+				snapshot: import("./recording/recordingLifecycle").RecordingLifecycleSnapshot | null,
+			) => void,
+		) => () => void;
+		reportRecordingFinalization: (
+			recordingId: number,
+			outcome: { status: "completed" | "failed" | "discarded"; error?: string },
+		) => Promise<{ success: boolean; error?: string }>;
+		getOrbSettings: () => Promise<import("./recording/orbSettings").OrbSettings>;
+		updateOrbSettings: (
+			patch: Partial<import("./recording/orbSettings").OrbSettings>,
+		) => Promise<{ success: boolean; settings?: import("./recording/orbSettings").OrbSettings }>;
+		resetOrbSettings: () => Promise<{
+			success: boolean;
+			settings?: import("./recording/orbSettings").OrbSettings;
+		}>;
+		onOrbSettingsChanged: (
+			callback: (settings: import("./recording/orbSettings").OrbSettings) => void,
+		) => () => void;
 		isNativeWindowsCaptureAvailable: () => Promise<{
 			success: boolean;
 			available: boolean;
@@ -172,7 +199,7 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
-		onStopRecordingFromTray: (callback: () => void) => () => void;
+		onRecordingStopRequested: (callback: (recordingId: number) => void) => () => void;
 		openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
 		pickExportSavePath: (
 			fileName: string,
@@ -187,6 +214,7 @@ interface Window {
 		writeExportToPath: (
 			videoData: ArrayBuffer,
 			filePath: string,
+			expectedFormat: import("../src/lib/exporter/types").ExportFormat,
 		) => Promise<{
 			success: boolean;
 			path?: string;

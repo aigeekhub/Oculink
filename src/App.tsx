@@ -2,6 +2,8 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { CountdownOverlay } from "./components/launch/CountdownOverlay.tsx";
 import { LaunchWindow } from "./components/launch/LaunchWindow";
 import { SourceSelector } from "./components/launch/SourceSelector";
+import { RecordingOrb } from "./components/recording-orb/RecordingOrb";
+import { AppSettings } from "./components/settings/AppSettings";
 import { Toaster } from "./components/ui/sonner";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useScopedT } from "./contexts/I18nContext";
@@ -27,7 +29,12 @@ export default function App() {
 			setWindowType(type);
 		}
 
-		if (type === "hud-overlay" || type === "source-selector" || type === "countdown-overlay") {
+		if (
+			type === "hud-overlay" ||
+			type === "source-selector" ||
+			type === "countdown-overlay" ||
+			type === "recording-orb"
+		) {
 			document.body.style.background = "transparent";
 			document.documentElement.style.background = "transparent";
 			document.getElementById("root")?.style.setProperty("background", "transparent");
@@ -49,11 +56,12 @@ export default function App() {
 	}, [windowType]);
 
 	useEffect(() => {
+		if (windowType === "recording-orb") return;
 		// Load custom fonts on app initialization
 		loadAllCustomFonts().catch((error) => {
 			console.error("Failed to load custom fonts:", error);
 		});
-	}, []);
+	}, [windowType]);
 
 	const content = (() => {
 		switch (windowType) {
@@ -63,6 +71,10 @@ export default function App() {
 				return <SourceSelector />;
 			case "countdown-overlay":
 				return <CountdownOverlay />;
+			case "recording-orb":
+				return <RecordingOrb />;
+			case "app-settings":
+				return <AppSettings />;
 			case "editor":
 				return (
 					<ShortcutsProvider>

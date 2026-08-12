@@ -7,9 +7,11 @@ import {
 	ipcMain,
 	Menu,
 	nativeImage,
+	screen,
 	session,
 	systemPreferences,
 	Tray,
+	webContents,
 } from "electron";
 import { ShortcutBinding } from "../src/lib/shortcuts";
 import { isDiagnosticModeEnabled, mainLogBuffer } from "./diagnostics/main-log-buffer";
@@ -20,11 +22,22 @@ import {
 } from "./globalShortcut";
 import { mainT, setMainLocale } from "./i18n";
 import { getSelectedDesktopSource, registerIpcHandlers } from "./ipc/handlers";
+import { getOrbBounds } from "./recording/orbBounds";
+import { OrbClickCoordinator } from "./recording/orbClickCoordinator";
+import {
+	DEFAULT_ORB_SETTINGS,
+	type OrbSettings,
+	OrbSettingsStore,
+	parseOrbSettingsPatch,
+} from "./recording/orbSettings";
+import { RecordingLifecycle } from "./recording/recordingLifecycle";
 import { acquireStableInstanceLock } from "./singleInstanceLock";
 import {
+	createAppSettingsWindow,
 	createCountdownOverlayWindow,
 	createEditorWindow,
 	createHudOverlayWindow,
+	createRecordingOrbWindow,
 	createSourceSelectorWindow,
 } from "./windows";
 
@@ -84,8 +97,16 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 let mainWindow: BrowserWindow | null = null;
 let sourceSelectorWindow: BrowserWindow | null = null;
 let countdownOverlayWindow: BrowserWindow | null = null;
+let recordingOrbWindow: BrowserWindow | null = null;
+let appSettingsWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let selectedSourceName = "";
+const recordingLifecycle = new RecordingLifecycle();
+const orbSettingsStore = new OrbSettingsStore(
+	path.join(app.getPath("userData"), "recording-orb-settings.json"),
+);
+let orbSettings: OrbSettings = { ...DEFAULT_ORB_SETTINGS };
+let orbClickCoordinator: OrbClickCoordinator | null = null;
 const isMac = process.platform === "darwin";
 const trayIconSize = isMac ? 16 : 24;
 
@@ -99,6 +120,9 @@ function createWindow() {
 	}
 
 	mainWindow = createHudOverlayWindow();
+	mainWindow.on("minimize", syncRecordingOrbVisibility);
+	mainWindow.on("restore", syncRecordingOrbVisibility);
+	mainWindow.on("show", syncRecordingOrbVisibility);
 }
 
 function showMainWindow() {
@@ -113,6 +137,263 @@ function showMainWindow() {
 
 	createWindow();
 }
+
+function showAppSettingsWindow() {
+	if (appSettingsWindow && !appSettingsWindow.isDestroyed()) {
+		appSettingsWindow.show();
+		appSettingsWindow.focus();
+		return;
+	}
+	appSettingsWindow = createAppSettingsWindow();
+	appSettingsWindow.on("closed", () => {
+		appSettingsWindow = null;
+	});
+}
+
+function broadcastRecordingLifecycle() {
+	const snapshot = recordingLifecycle.getSnapshot();
+	for (const window of BrowserWindow.getAllWindows()) {
+		if (!window.isDestroyed()) {
+			window.webContents.send("recording-lifecycle-changed", snapshot);
+		}
+	}
+}
+
+function broadcastOrbSettings() {
+	for (const window of BrowserWindow.getAllWindows()) {
+		if (!window.isDestroyed()) {
+			window.webContents.send("orb-settings-changed", { ...orbSettings });
+		}
+	}
+}
+
+function getRecorderOwnerWindow(): BrowserWindow | null {
+	const snapshot = recordingLifecycle.getSnapshot();
+	if (!snapshot) return null;
+	const ownerContents = webContents.fromId(snapshot.ownerWebContentsId);
+	return ownerContents && !ownerContents.isDestroyed()
+		? BrowserWindow.fromWebContents(ownerContents)
+		: null;
+}
+
+function restoreRecorderOwner() {
+	const ownerWindow = getRecorderOwnerWindow();
+	if (!ownerWindow || ownerWindow.isDestroyed()) return;
+	if (ownerWindow.isMinimized()) ownerWindow.restore();
+	ownerWindow.show();
+	ownerWindow.focus();
+	syncRecordingOrbVisibility();
+}
+
+function destroyRecordingOrb() {
+	orbClickCoordinator?.dispose();
+	orbClickCoordinator = null;
+	const window = recordingOrbWindow;
+	recordingOrbWindow = null;
+	if (window && !window.isDestroyed()) window.destroy();
+}
+
+function requestActiveRecordingStop(): boolean {
+	const before = recordingLifecycle.getSnapshot();
+	if (!before || before.phase !== "recording") return false;
+	const after = recordingLifecycle.requestStop(before.recordingId);
+	if (!after) return false;
+	if (before.stopRequested) return true;
+
+	const ownerContents = webContents.fromId(after.ownerWebContentsId);
+	if (!ownerContents || ownerContents.isDestroyed()) {
+		recordingLifecycle.fail(after.recordingId, "Recording controller is unavailable");
+		updateTrayMenu(false);
+		return false;
+	}
+	ownerContents.send("recording-stop-requested", after.recordingId);
+	return true;
+}
+
+function resolveRecordingOrbBounds(window: BrowserWindow | null = recordingOrbWindow) {
+	const displays = screen.getAllDisplays();
+	const fallbackDisplay =
+		window && !window.isDestroyed()
+			? screen.getDisplayMatching(window.getBounds())
+			: screen.getPrimaryDisplay();
+	return getOrbBounds(
+		displays.map((display) => ({ id: String(display.id), workArea: display.workArea })),
+		orbSettings.placement,
+		orbSettings.size,
+		String(fallbackDisplay.id),
+	);
+}
+
+function applyRecordingOrbBounds(window: BrowserWindow) {
+	const bounds = resolveRecordingOrbBounds(window);
+	if (bounds) window.setBounds(bounds, false);
+	const availableDisplayIds = new Set(screen.getAllDisplays().map((display) => String(display.id)));
+	if (
+		!orbSettings.placement.displayId ||
+		!availableDisplayIds.has(orbSettings.placement.displayId)
+	) {
+		const displayId = String(screen.getDisplayMatching(window.getBounds()).id);
+		const placement = { ...orbSettings.placement, displayId };
+		orbSettings = { ...orbSettings, placement };
+		void orbSettingsStore.update({ placement }).catch((error) => {
+			console.warn("Failed to persist recording orb display placement:", error);
+		});
+	}
+}
+
+function ensureRecordingOrbWindow() {
+	if (!orbSettings.enabled) return null;
+	if (recordingOrbWindow && !recordingOrbWindow.isDestroyed()) return recordingOrbWindow;
+
+	const window = createRecordingOrbWindow(resolveRecordingOrbBounds(null) ?? undefined);
+	recordingOrbWindow = window;
+	orbClickCoordinator = new OrbClickCoordinator();
+	window.setAlwaysOnTop(orbSettings.alwaysOnTop);
+	window.setOpacity(orbSettings.transparency / 100);
+	applyRecordingOrbBounds(window);
+	window.webContents.on("before-mouse-event", (event, input) => {
+		if (input.type !== "mouseDown" || input.button !== "left") return;
+		event.preventDefault();
+		orbClickCoordinator?.handle(
+			Math.max(1, input.clickCount ?? 1),
+			restoreRecorderOwner,
+			requestActiveRecordingStop,
+		);
+	});
+	window.once("ready-to-show", syncRecordingOrbVisibility);
+	window.on("closed", () => {
+		if (recordingOrbWindow === window) recordingOrbWindow = null;
+		orbClickCoordinator?.dispose();
+		orbClickCoordinator = null;
+	});
+	return window;
+}
+
+function syncRecordingOrbVisibility() {
+	const snapshot = recordingLifecycle.getSnapshot();
+	const isActive = snapshot?.phase === "recording" || snapshot?.phase === "stopping";
+	const controllerMinimized = Boolean(
+		mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized(),
+	);
+	if (!orbSettings.enabled || !isActive) {
+		destroyRecordingOrb();
+		return;
+	}
+
+	const window = ensureRecordingOrbWindow();
+	if (!window || window.isDestroyed()) return;
+	window.setAlwaysOnTop(orbSettings.alwaysOnTop);
+	window.setOpacity(orbSettings.transparency / 100);
+	applyRecordingOrbBounds(window);
+	if (controllerMinimized) {
+		if (window.isVisible()) return;
+		window.showInactive();
+	} else if (window.isVisible()) {
+		window.hide();
+	}
+}
+
+function parseFinalizationOutcome(
+	value: unknown,
+): { status: "completed" | "failed" | "discarded"; error?: string } | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	const keys = Object.keys(record);
+	if (keys.some((key) => key !== "status" && key !== "error")) return null;
+	if (!["completed", "failed", "discarded"].includes(String(record.status))) return null;
+	if ("error" in record && typeof record.error !== "string") return null;
+	return {
+		status: record.status as "completed" | "failed" | "discarded",
+		...((record.error as string | undefined) ? { error: record.error as string } : {}),
+	};
+}
+
+function registerRecordingOrbIpc() {
+	ipcMain.handle("get-recording-lifecycle-snapshot", () => recordingLifecycle.getSnapshot());
+	ipcMain.handle("get-orb-settings", () => ({ ...orbSettings }));
+	ipcMain.handle("set-recording-paused", (event, recordingId: number, paused: boolean) => {
+		const snapshot = recordingLifecycle.getSnapshot();
+		if (
+			!snapshot ||
+			snapshot.recordingId !== recordingId ||
+			snapshot.ownerWebContentsId !== event.sender.id ||
+			typeof paused !== "boolean"
+		) {
+			return { success: false, error: "Invalid recording pause transition" };
+		}
+		recordingLifecycle.setPaused(recordingId, paused);
+		return { success: true };
+	});
+	ipcMain.handle("update-orb-settings", async (_event, value: unknown) => {
+		const patch = parseOrbSettingsPatch(value);
+		if (!patch) return { success: false };
+		try {
+			orbSettings = await orbSettingsStore.update(patch);
+			broadcastOrbSettings();
+			syncRecordingOrbVisibility();
+			return { success: true, settings: { ...orbSettings } };
+		} catch (error) {
+			console.error("Failed to persist recording orb settings:", error);
+			return { success: false };
+		}
+	});
+	ipcMain.handle("reset-orb-settings", async () => {
+		try {
+			orbSettings = await orbSettingsStore.reset();
+			broadcastOrbSettings();
+			syncRecordingOrbVisibility();
+			return { success: true, settings: { ...orbSettings } };
+		} catch (error) {
+			console.error("Failed to reset recording orb settings:", error);
+			return { success: false };
+		}
+	});
+	ipcMain.handle("report-recording-finalization", (event, recordingId: number, value: unknown) => {
+		const snapshot = recordingLifecycle.getSnapshot();
+		const outcome = parseFinalizationOutcome(value);
+		if (
+			!snapshot ||
+			!Number.isSafeInteger(recordingId) ||
+			recordingId !== snapshot.recordingId ||
+			event.sender.id !== snapshot.ownerWebContentsId ||
+			!outcome
+		) {
+			return { success: false, error: "Invalid or stale recording finalization" };
+		}
+
+		if (outcome.status === "completed") {
+			if (snapshot.phase === "completed") return { success: true };
+			if (snapshot.phase === "failed") {
+				return { success: false, error: "Recording has already failed" };
+			}
+			recordingLifecycle.complete(recordingId);
+			updateTrayMenu(false);
+			createEditorWindowWrapper();
+			return { success: true };
+		}
+		if (outcome.status === "failed") {
+			if (snapshot.phase === "failed") return { success: true };
+			if (snapshot.phase === "completed") {
+				return { success: false, error: "Recording has already completed" };
+			}
+			recordingLifecycle.fail(recordingId, outcome.error ?? "Recording finalization failed");
+			updateTrayMenu(false);
+			return { success: true };
+		}
+
+		if (snapshot.phase === "completed" || snapshot.phase === "failed") {
+			return { success: false, error: "Recording has already finalized" };
+		}
+		recordingLifecycle.clear(recordingId);
+		updateTrayMenu(false);
+		return { success: true };
+	});
+}
+
+recordingLifecycle.subscribe(() => {
+	broadcastRecordingLifecycle();
+	syncRecordingOrbVisibility();
+});
 
 const stableInstanceLock = acquireStableInstanceLock();
 const hasElectronSingleInstanceLock = app.requestSingleInstanceLock();
@@ -162,6 +443,12 @@ function setupApplicationMenu() {
 				{
 					role: "about",
 					label: mainT("common", "actions.about") || "About OpenScreen",
+				},
+				{ type: "separator" },
+				{
+					label: "Settings…",
+					accelerator: "CmdOrCtrl+,",
+					click: showAppSettingsWindow,
 				},
 				{ type: "separator" },
 				{
@@ -215,6 +502,12 @@ function setupApplicationMenu() {
 				...(isMac
 					? []
 					: [
+							{ type: "separator" as const },
+							{
+								label: "Settings…",
+								accelerator: "CmdOrCtrl+,",
+								click: showAppSettingsWindow,
+							},
 							{ type: "separator" as const },
 							{
 								role: "quit" as const,
@@ -334,11 +627,7 @@ function updateTrayMenu(recording: boolean = false) {
 		? [
 				{
 					label: mainT("common", "actions.stopRecording") || "Stop Recording",
-					click: () => {
-						if (mainWindow && !mainWindow.isDestroyed()) {
-							mainWindow.webContents.send("stop-recording-from-tray");
-						}
-					},
+					click: requestActiveRecordingStop,
 				},
 			]
 		: [
@@ -384,13 +673,14 @@ function forceCloseEditorWindow(windowToClose: BrowserWindow | null) {
 }
 
 function createEditorWindowWrapper() {
-	if (mainWindow) {
-		isForceClosing = true;
-		mainWindow.close();
-		isForceClosing = false;
-		mainWindow = null;
-	}
+	const previousWindow = mainWindow;
 	mainWindow = createEditorWindow();
+
+	if (previousWindow && !previousWindow.isDestroyed()) {
+		isForceClosing = true;
+		previousWindow.close();
+		isForceClosing = false;
+	}
 	editorHasUnsavedChanges = false;
 
 	mainWindow.on("close", (event) => {
@@ -452,6 +742,8 @@ function createCountdownOverlayWindowWrapper() {
 // Closing every window quits the app (tray goes too). The in-app "Return to Recorder"
 // button covers the editor-to-HUD round-trip, so closing the last window means "I'm done".
 app.on("window-all-closed", () => {
+	const snapshot = recordingLifecycle.getSnapshot();
+	if (snapshot?.phase === "recording" || snapshot?.phase === "stopping") return;
 	app.quit();
 });
 
@@ -464,7 +756,8 @@ app.on("activate", () => {
 
 		const url = window.webContents.getURL();
 		const isCountdownOverlayWindow = url.includes("windowType=countdown-overlay");
-		return !isCountdownOverlayWindow;
+		const isRecordingOrbWindow = url.includes("windowType=recording-orb");
+		return !isCountdownOverlayWindow && !isRecordingOrbWindow;
 	});
 	if (!hasVisibleWindow) {
 		showMainWindow();
@@ -472,6 +765,7 @@ app.on("activate", () => {
 });
 
 app.on("will-quit", () => {
+	destroyRecordingOrb();
 	unregisterAllGlobalShortcuts();
 	stableInstanceLock?.release();
 });
@@ -483,6 +777,17 @@ appReady?.then(async () => {
 		mainLogBuffer.install();
 		console.info("[diagnostic] OPENSCREEN_DIAGNOSTIC=1, capturing console.* into ring buffer");
 	}
+
+	orbSettings = await orbSettingsStore.load();
+	registerRecordingOrbIpc();
+	const reclampRecordingOrb = () => {
+		if (recordingOrbWindow && !recordingOrbWindow.isDestroyed()) {
+			applyRecordingOrbBounds(recordingOrbWindow);
+		}
+	};
+	screen.on("display-added", reclampRecordingOrb);
+	screen.on("display-removed", reclampRecordingOrb);
+	screen.on("display-metrics-changed", reclampRecordingOrb);
 
 	// Force "regular" activation policy so the Dock icon appears. The HUD overlay
 	// (transparent, frameless, skipTaskbar) is the first window, and AppKit would
@@ -578,12 +883,27 @@ appReady?.then(async () => {
 		() => mainWindow,
 		() => sourceSelectorWindow,
 		() => countdownOverlayWindow,
-		(recording: boolean, sourceName: string) => {
+		(recording, sourceName, change) => {
 			selectedSourceName = sourceName;
 			if (!tray) createTray();
-			updateTrayMenu(recording);
-			if (!recording) {
-				showMainWindow();
+			if (
+				recording &&
+				Number.isSafeInteger(change.recordingId) &&
+				(change.recordingId ?? 0) > 0 &&
+				Number.isSafeInteger(change.ownerWebContentsId) &&
+				change.ownerWebContentsId > 0
+			) {
+				const recordingId = change.recordingId as number;
+				const started = recordingLifecycle.start(recordingId, change.ownerWebContentsId);
+				if (!started) return;
+				if (typeof change.paused === "boolean") {
+					recordingLifecycle.setPaused(recordingId, change.paused);
+				}
+				updateTrayMenu(true);
+				return;
+			}
+			if (!recording && Number.isSafeInteger(change.recordingId)) {
+				recordingLifecycle.requestStop(change.recordingId as number);
 			}
 		},
 		switchToHudWrapper,

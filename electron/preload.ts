@@ -1,9 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { ExportFormat } from "../src/lib/exporter/types";
 import type { NativeMacRecordingRequest } from "../src/lib/nativeMacRecording";
 import type { NativeWindowsRecordingRequest } from "../src/lib/nativeWindowsRecording";
 import type { RecordingSession, StoreRecordedSessionInput } from "../src/lib/recordingSession";
 import type { ShortcutBinding } from "../src/lib/shortcuts";
 import { NATIVE_BRIDGE_CHANNEL, type NativeBridgeRequest } from "../src/native/contracts";
+import type { OrbSettings } from "./recording/orbSettings";
+import type { RecordingLifecycleSnapshot } from "./recording/recordingLifecycle";
 
 // Asset base URL is passed from the main process via webPreferences.additionalArguments
 // (see windows.ts). Sandboxed preloads cannot import node:path / node:url, so we
@@ -98,6 +101,40 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	) => {
 		return ipcRenderer.invoke("set-recording-state", recording, recordingId, cursorCaptureMode);
 	},
+	setRecordingPaused: (recordingId: number, paused: boolean) => {
+		return ipcRenderer.invoke("set-recording-paused", recordingId, paused);
+	},
+	getRecordingLifecycleSnapshot: () => {
+		return ipcRenderer.invoke("get-recording-lifecycle-snapshot");
+	},
+	onRecordingLifecycleChanged: (
+		callback: (snapshot: RecordingLifecycleSnapshot | null) => void,
+	) => {
+		const listener = (_event: unknown, snapshot: RecordingLifecycleSnapshot | null) =>
+			callback(snapshot);
+		ipcRenderer.on("recording-lifecycle-changed", listener);
+		return () => ipcRenderer.removeListener("recording-lifecycle-changed", listener);
+	},
+	reportRecordingFinalization: (
+		recordingId: number,
+		outcome: { status: "completed" | "failed" | "discarded"; error?: string },
+	) => {
+		return ipcRenderer.invoke("report-recording-finalization", recordingId, outcome);
+	},
+	getOrbSettings: () => {
+		return ipcRenderer.invoke("get-orb-settings");
+	},
+	updateOrbSettings: (patch: Partial<OrbSettings>) => {
+		return ipcRenderer.invoke("update-orb-settings", patch);
+	},
+	resetOrbSettings: () => {
+		return ipcRenderer.invoke("reset-orb-settings");
+	},
+	onOrbSettingsChanged: (callback: (settings: OrbSettings) => void) => {
+		const listener = (_event: unknown, settings: OrbSettings) => callback(settings);
+		ipcRenderer.on("orb-settings-changed", listener);
+		return () => ipcRenderer.removeListener("orb-settings-changed", listener);
+	},
 	isNativeWindowsCaptureAvailable: () => {
 		return ipcRenderer.invoke("is-native-windows-capture-available");
 	},
@@ -142,10 +179,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	discardCursorTelemetry: (recordingId: number) => {
 		return ipcRenderer.invoke("discard-cursor-telemetry", recordingId);
 	},
-	onStopRecordingFromTray: (callback: () => void) => {
-		const listener = () => callback();
-		ipcRenderer.on("stop-recording-from-tray", listener);
-		return () => ipcRenderer.removeListener("stop-recording-from-tray", listener);
+	onRecordingStopRequested: (callback: (recordingId: number) => void) => {
+		const listener = (_event: unknown, recordingId: number) => callback(recordingId);
+		ipcRenderer.on("recording-stop-requested", listener);
+		return () => ipcRenderer.removeListener("recording-stop-requested", listener);
 	},
 	openExternalUrl: (url: string) => {
 		return ipcRenderer.invoke("open-external-url", url);
@@ -153,8 +190,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	pickExportSavePath: (fileName: string, exportFolder?: string) => {
 		return ipcRenderer.invoke("pick-export-save-path", fileName, exportFolder);
 	},
-	writeExportToPath: (videoData: ArrayBuffer, filePath: string) => {
-		return ipcRenderer.invoke("write-export-to-path", videoData, filePath);
+	writeExportToPath: (videoData: ArrayBuffer, filePath: string, expectedFormat: ExportFormat) => {
+		return ipcRenderer.invoke("write-export-to-path", videoData, filePath, expectedFormat);
 	},
 	openVideoFilePicker: () => {
 		return ipcRenderer.invoke("open-video-file-picker");
