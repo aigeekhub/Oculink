@@ -34,6 +34,7 @@ add_executable(wgc-capture
 target_compile_definitions(wgc-capture PRIVATE
   NOMINMAX
   WIN32_LEAN_AND_MEAN
+  _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
   _WIN32_WINNT=0x0A00
 )
 
