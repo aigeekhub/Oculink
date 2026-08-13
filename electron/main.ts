@@ -38,6 +38,7 @@ import {
 	createEditorWindow,
 	createHudOverlayWindow,
 	createRecordingOrbWindow,
+	createNotesWindow,
 	createSourceSelectorWindow,
 } from "./windows";
 
@@ -99,6 +100,7 @@ let sourceSelectorWindow: BrowserWindow | null = null;
 let countdownOverlayWindow: BrowserWindow | null = null;
 let recordingOrbWindow: BrowserWindow | null = null;
 let appSettingsWindow: BrowserWindow | null = null;
+let notesWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let selectedSourceName = "";
 const recordingLifecycle = new RecordingLifecycle();
@@ -727,6 +729,19 @@ function createSourceSelectorWindowWrapper() {
 	return sourceSelectorWindow;
 }
 
+function createNotesWindowWrapper() {
+	{
+		notesWindow = createNotesWindow();
+		notesWindow.on("closed", () => {
+			notesWindow = null;
+			if (mainWindow && !mainWindow.isDestroyed()) {
+				mainWindow.webContents.send("notes-window-closed");
+			}
+		});
+		return notesWindow;
+	}
+}
+
 function createCountdownOverlayWindowWrapper() {
 	if (countdownOverlayWindow && !countdownOverlayWindow.isDestroyed()) {
 		return countdownOverlayWindow;
@@ -880,8 +895,10 @@ appReady?.then(async () => {
 		createEditorWindowWrapper,
 		createSourceSelectorWindowWrapper,
 		createCountdownOverlayWindowWrapper,
+		createNotesWindowWrapper,
 		() => mainWindow,
 		() => sourceSelectorWindow,
+		() => notesWindow,
 		() => countdownOverlayWindow,
 		(recording, sourceName, change) => {
 			selectedSourceName = sourceName;

@@ -31,7 +31,8 @@
 		"selectRegion": "选择要调整的速度区域",
 		"deleteRegion": "删除速度区域",
 		"customPlaybackSpeed": "自定义播放速度",
-		"maxSpeedError": "速度不能超过 16×"
+		"maxSpeedError": "速度不能超过 {{max}}×",
+		"previewFrameSteppingHint": "超过 {{native}}× 时，预览为逐帧跳转且静音，导出不受影响。"
 	},
 	"trim": {
 		"deleteRegion": "删除剪辑区域"
@@ -161,7 +162,6 @@
 		"invalidImageType": "无效的文件类型",
 		"imageFormatsOnly": "请上传 JPG、PNG、GIF 或 WebP 格式的图片文件。",
 		"imageUploadSuccess": "图片上传成功！",
-		"failedImageUpload": "上传图片失败",
 		"blurColor": "模糊颜色",
 		"blurColorBlack": "黑色",
 		"blurColorWhite": "白色",
