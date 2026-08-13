@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_LIBRARIES
 
 project(openscreen-wgc-capture LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -37,7 +37,7 @@ target_compile_definitions(wgc-capture PRIVATE
   _WIN32_WINNT=0x0A00
 )
 
-target_compile_options(wgc-capture PRIVATE /EHsc /W4 /utf-8)
+target_compile_options(wgc-capture PRIVATE /EHsc /W4 /utf-8 /await)
 
 target_link_libraries(wgc-capture PRIVATE
   d3d11
@@ -55,7 +55,6 @@ add_executable(cursor-sampler
 )
 
 target_compile_definitions(cursor-sampler PRIVATE
-  NOMINMAX
   _WIN32_WINNT=0x0A00
 )
 

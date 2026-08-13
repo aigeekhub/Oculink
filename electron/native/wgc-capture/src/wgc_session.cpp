@@ -177,12 +177,6 @@ bool WgcSession::applySessionOptions(bool captureCursor) {
         }
     }
 
-    try {
-        session_.IsBorderRequired(false);
-    } catch (...) {
-        // IsBorderRequired is Windows 11-only. Ignore it on older builds.
-    }
-
     return true;
 }
 

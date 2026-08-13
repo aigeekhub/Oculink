@@ -415,7 +415,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const int intervalMs = std::max(1, std::atoi(argv[1]));
+    const int intervalMs = (std::max)(1, std::atoi(argv[1]));
 
     HWND targetWindow = nullptr;
     if (argc >= 3) {
