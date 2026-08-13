@@ -84,6 +84,16 @@ Together, the scripts make it quick to inspect:
 
 They are not a full substitute for an end-to-end manual recording pass. Before shipping cursor changes, also test a real capture session and export from the packaged app.
 
+## Recording orb capture and display checklist
+
+Automated Windows evidence (2026-08-12): `recording-orb-live-smoke.spec.ts` passed a real display recording through Settings launch, recorder minimization, focus-free orb display, work-area bounds, live size/opacity/Always-on-Top updates, double-click stop, persisted editor handoff, and orb cleanup. Capture exclusion and physical monitor disconnection remain manual observations.
+
+- [ ] Start a display capture, minimize the recorder, and confirm the orb appears without taking focus.
+- [ ] Repeat with a window capture and confirm the orb remains clickable but absent from the captured output. Windows capture APIs can vary by source and OS build, so record the observed result rather than assuming `setContentProtection` guarantees exclusion.
+- [ ] Move the recorder between displays with different scale factors, then minimize it. Confirm the complete orb stays inside the selected display work area.
+- [ ] Disconnect the display containing a visible orb. Confirm it moves into a remaining work area and remains reachable.
+- [ ] Change orb size, transparency, pulse, and Always on Top in Settings while it is visible. Confirm safe changes apply without recreating or focusing the orb.
+
 ## Known Gap
 
 Windows native cursor `Click Bounce` is currently backlogged. `Size`, `Smoothing`, and `Motion Blur` can be validated through preview/export, but `Click Bounce` has not shown a visible effect in packaged-app manual testing. The current diagnostic can observe synthetic click metadata, but that is not enough to validate the real OpenScreen record -> preview -> export path.

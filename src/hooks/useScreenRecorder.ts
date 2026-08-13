@@ -14,6 +14,7 @@ import {
 import type { CursorCaptureMode, RecordedVideoAssetInput } from "@/lib/recordingSession";
 import { requestCameraAccess } from "@/lib/requestCameraAccess";
 import { createRecorderHandle, type RecorderHandle } from "./recorderHandle";
+import { persistBeforeCompletion } from "./recordingFinalization";
 
 const TARGET_FRAME_RATE = 60;
 const MIN_FRAME_RATE = 30;
@@ -332,7 +333,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			setElapsedSeconds(0);
 			accumulatedDurationMs.current = 0;
 			segmentStartedAt.current = null;
-			window.electronAPI?.setRecordingState(false);
+			window.electronAPI?.setRecordingState(false, activeRecordingId);
 
 			void (async () => {
 				// Each disk stream must end up either saved or explicitly discarded.
@@ -344,10 +345,17 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					const screenBlob = await activeScreenRecorder.recordedBlobPromise;
 					if (discardRecordingId.current === activeRecordingId) {
 						window.electronAPI?.discardCursorTelemetry(activeRecordingId);
+						await window.electronAPI.reportRecordingFinalization(activeRecordingId, {
+							status: "discarded",
+						});
 						return;
 					}
 					// When streaming succeeded the blob is empty; the data is already on disk.
 					if (!activeScreenRecorder.isStreaming() && screenBlob.size === 0) {
+						await window.electronAPI.reportRecordingFinalization(activeRecordingId, {
+							status: "failed",
+							error: "Recording produced no video data",
+						});
 						return;
 					}
 
@@ -374,36 +382,50 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					}
 					webcamIncludedInSave = webcamVideoData !== undefined;
 
-					const result = await window.electronAPI.storeRecordedSession({
-						screen: {
-							videoData: screenVideoData,
-							fileName: screenFileName,
+					const finalization = await persistBeforeCompletion({
+						persist: async () => {
+							const result = await window.electronAPI.storeRecordedSession({
+								screen: {
+									videoData: screenVideoData,
+									fileName: screenFileName,
+								},
+								webcam:
+									webcamVideoData !== undefined
+										? { videoData: webcamVideoData, fileName: webcamFileName }
+										: undefined,
+								createdAt: activeRecordingId,
+								cursorCaptureMode,
+								durationMs: duration,
+							});
+							if (!result.success) {
+								throw new Error(result.message ?? "Failed to store recording session");
+							}
+							storeSucceeded = true;
+							return result;
 						},
-						webcam:
-							webcamVideoData !== undefined
-								? { videoData: webcamVideoData, fileName: webcamFileName }
-								: undefined,
-						createdAt: activeRecordingId,
-						cursorCaptureMode,
-						durationMs: duration,
+						assign: async (result) => {
+							if (result.session) {
+								await window.electronAPI.setCurrentRecordingSession(result.session);
+							} else if (result.path) {
+								await window.electronAPI.setCurrentVideoPath(result.path);
+							} else {
+								throw new Error("Stored recording did not return a session or video path");
+							}
+						},
+						report: (outcome) =>
+							window.electronAPI.reportRecordingFinalization(activeRecordingId, outcome),
 					});
-
-					if (!result.success) {
-						console.error("Failed to store recording session:", result.message);
-						return;
+					if (!finalization.success) {
+						console.error("Error saving recording:", finalization.error);
 					}
-					// store-recorded-session has flushed and closed the saved streams.
-					storeSucceeded = true;
-
-					if (result.session) {
-						await window.electronAPI.setCurrentRecordingSession(result.session);
-					} else if (result.path) {
-						await window.electronAPI.setCurrentVideoPath(result.path);
-					}
-
-					await window.electronAPI.switchToEditor();
 				} catch (error) {
 					console.error("Error saving recording:", error);
+					await window.electronAPI
+						.reportRecordingFinalization(activeRecordingId, {
+							status: "failed",
+							error: error instanceof Error ? error.message : String(error),
+						})
+						.catch(() => undefined);
 				} finally {
 					// Discard any recorder whose data wasn't part of a successful save (discarded
 					// run, failed save, or a webcam whose disk write failed while the screen still
@@ -467,12 +489,19 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				const result = await window.electronAPI.stopNativeWindowsRecording(discard);
 				if (discard || result.discarded) {
 					clearNativeRecordingState();
+					await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "discarded",
+					});
 					return true;
 				}
 				if (!result.success) {
 					console.error("Failed to stop native Windows recording:", result.error);
 					toast.error(result.error ?? "Failed to stop native Windows recording");
-					activeNativeRecording.finalizing = false;
+					await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "failed",
+						error: result.error ?? "Failed to stop native Windows recording",
+					});
+					clearNativeRecordingState();
 					return true;
 				}
 
@@ -512,14 +541,23 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					await window.electronAPI.setCurrentVideoPath(result.path);
 				}
 
-				await window.electronAPI.switchToEditor();
+				await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+					status: "completed",
+				});
 				return true;
 			} catch (error) {
 				console.error("Error saving native Windows recording:", error);
+				clearNativeRecordingState();
+				await window.electronAPI
+					.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "failed",
+						error:
+							error instanceof Error ? error.message : "Failed to save native Windows recording",
+					})
+					.catch(() => undefined);
 				toast.error(
 					error instanceof Error ? error.message : "Failed to save native Windows recording",
 				);
-				activeNativeRecording.finalizing = false;
 				return true;
 			} finally {
 				if (discardRecordingId.current === activeNativeRecording.recordingId) {
@@ -585,12 +623,19 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				const webcamAsset = await webcamAssetPromise;
 				if (discard || result.discarded) {
 					clearNativeRecordingState();
+					await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "discarded",
+					});
 					return true;
 				}
 				if (!result.success) {
 					console.error("Failed to stop native macOS recording:", result.error);
 					toast.error(result.error ?? "Failed to stop native macOS recording");
-					activeNativeRecording.finalizing = false;
+					await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "failed",
+						error: result.error ?? "Failed to stop native macOS recording",
+					});
+					clearNativeRecordingState();
 					return true;
 				}
 
@@ -616,14 +661,22 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					await window.electronAPI.setCurrentVideoPath(result.path);
 				}
 
-				await window.electronAPI.switchToEditor();
+				await window.electronAPI.reportRecordingFinalization(activeNativeRecording.recordingId, {
+					status: "completed",
+				});
 				return true;
 			} catch (error) {
 				console.error("Error saving native macOS recording:", error);
+				clearNativeRecordingState();
+				await window.electronAPI
+					.reportRecordingFinalization(activeNativeRecording.recordingId, {
+						status: "failed",
+						error: error instanceof Error ? error.message : "Failed to save native macOS recording",
+					})
+					.catch(() => undefined);
 				toast.error(
 					error instanceof Error ? error.message : "Failed to save native macOS recording",
 				);
-				activeNativeRecording.finalizing = false;
 				return true;
 			} finally {
 				if (discardRecordingId.current === activeNativeRecording.recordingId) {
@@ -696,11 +749,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	useEffect(() => {
 		let cleanup: (() => void) | undefined;
 
-		if (window.electronAPI?.onStopRecordingFromTray) {
-			cleanup = window.electronAPI.onStopRecordingFromTray(() => {
+		cleanup = window.electronAPI.onRecordingStopRequested((requestedRecordingId) => {
+			if (requestedRecordingId === recordingId.current) {
 				stopRecording.current();
-			});
-		}
+			}
+		});
 
 		return () => {
 			const activeRunId = countdownRunId.current;
@@ -1523,6 +1576,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				}
 				segmentStartedAt.current = Date.now();
 				setPaused(false);
+				void window.electronAPI.setRecordingPaused(recordingId.current, false);
 			} catch (error) {
 				console.error("Failed to resume recording:", error);
 			}
@@ -1542,6 +1596,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				activeWebcamRecorder.pause();
 			}
 			setPaused(true);
+			void window.electronAPI.setRecordingPaused(recordingId.current, true);
 		} catch (error) {
 			console.error("Failed to pause recording:", error);
 		}

@@ -76,3 +76,12 @@ Both workflows require the `OPENSCREEN_RELEASE_TOKEN` secret (a fine-grained PAT
 - **i18n**: 13 locales in `src/i18n/locales/<locale>/` (e.g. `src/i18n/locales/en/settings.json`). The `i18n:check` script validates them — run it after touching translation files.
 - **Build pipeline**: `npm run build` is full electron-builder. For iterating on renderer only, use `npm run build-vite` (Vite + tsc, no packaging).
 - **README tone**: the project is explicitly "not production-grade" and free forever — don't add paywalls, premium tiers, or upsell language to UI/copy.
+
+## Child DOX Index
+
+- `electron/` - main process, IPC, window lifecycle, tray/menu logic, and native-capture integration. See `electron/AGENTS.md` and `electron/native/AGENTS.md`.
+- `src/` - renderer UI, hooks, shared libraries, i18n, and editor/launch experiences. See `src/AGENTS.md`.
+- `docs/` - architecture notes, roadmap, and testing guidance. See `docs/AGENTS.md`.
+- `scripts/` - deterministic tooling, native build helpers, diagnostics, and repo automation. See `scripts/AGENTS.md`.
+- `tests/` - Playwright E2E coverage and fixtures. See `tests/AGENTS.md`.
+- `public/`, `icons/`, `nix/` - asset and packaging directories. No child DOX docs yet.
